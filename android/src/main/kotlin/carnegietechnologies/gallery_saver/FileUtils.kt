@@ -38,10 +38,10 @@ internal object FileUtils {
      * @return true if image was saved successfully
      */
     fun insertImage(
-        contentResolver: ContentResolver,
-        path: String,
-        folderName: String?,
-        toDcim: Boolean
+            contentResolver: ContentResolver,
+            path: String,
+            folderName: String?,
+            toDcim: Boolean
     ): Boolean {
         val file = File(path)
         val extension = MimeTypeMap.getFileExtensionFromUrl(file.toString())
@@ -71,8 +71,7 @@ internal object FileUtils {
 
         if (android.os.Build.VERSION.SDK_INT < 29) {
             values.put(MediaStore.Images.ImageColumns.DATA, imageFilePath)
-        }
-        else {
+        } else {
             values.put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
             values.put(MediaStore.Images.Media.RELATIVE_PATH, directory + File.separator + folderName)
         }
@@ -94,265 +93,164 @@ internal object FileUtils {
 
                 if (imageUri != null && android.os.Build.VERSION.SDK_INT < 29) {
                     val pathId = ContentUris.parseId(imageUri)
-                    val miniThumb = MediaStore.Images.Thumbnails.getThumbnail(
-                            contentResolver, pathId, MediaStore.Images.Thumbnails.MINI_KIND, null)
-                    storeThumbnail(contentResolver, miniThumb, pathId)
+                    val baseUri = Uri.parse("content://media/external/images/media")
+                    imageUri = Uri.withAppendedPath(baseUri, "" + pathId)
                 }
-            } else {
-                if (imageUri != null) {
-                    contentResolver.delete(imageUri, null, null)
-                }
-                imageUri = null
+
+                return true
             }
-        } catch (e: IOException) {
-            contentResolver.delete(imageUri!!, null, null)
-            return false
-        } catch (t: Throwable) {
-            return false
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to insert image", e)
         }
 
-        return true
+        return false
     }
 
     /**
-     * @param source -  array of bytes that will be rotated if it needs to be done
-     * @param path   - path to image that needs to be checked for rotation
-     * @return - array of bytes from rotated image, if rotation needs to be performed
+     * Returns the folder path for storing media files
+     *
+     * @param folderName - folder name for storing media files
+     * @param mediaType  - media type (image or video)
+     * @param toDcim     - whether the file should be saved to DCIM
+     * @return folder path
      */
-    private fun getRotatedBytesIfNecessary(source: ByteArray?, path: String): ByteArray? {
-        var rotationInDegrees = 0
-
-        try {
-            rotationInDegrees = exifToDegrees(getRotation(path))
-        } catch (e: IOException) {
-            Log.d(TAG, e.toString())
+    private fun getAlbumFolderPath(folderName: String?, mediaType: MediaType, toDcim: Boolean): String {
+        val baseDirectory = if (toDcim) {
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+        } else {
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
         }
 
-        if (rotationInDegrees == 0) {
+        val albumFolder = if (!TextUtils.isEmpty(folderName)) {
+            File(baseDirectory, folderName)
+        } else {
+            File(baseDirectory, mediaType.folderName)
+        }
+
+        if (!albumFolder.exists()) {
+            albumFolder.mkdirs()
+        }
+
+        return albumFolder.absolutePath
+    }
+
+    /**
+     * Rotates the image if necessary based on its orientation value
+     *
+     * @param bytes - image byte array
+     * @param path  - image file path
+     * @return rotated image byte array, or null if no rotation is required
+     */
+    private fun getRotatedBytesIfNecessary(bytes: ByteArray?, path: String): ByteArray? {
+        if (bytes == null || !isRotationRequired(path)) {
             return null
         }
 
-        val bitmap = BitmapFactory.decodeByteArray(source, 0, source!!.size)
-        val matrix = Matrix()
-        matrix.preRotate(rotationInDegrees.toFloat())
-        val adjustedBitmap = Bitmap.createBitmap(
-            bitmap, 0, 0,
-            bitmap.width, bitmap.height, matrix, true
-        )
-        bitmap.recycle()
-
-        val rotatedBytes = bitmapToArray(adjustedBitmap)
-
-        adjustedBitmap.recycle()
-
-        return rotatedBytes
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        val orientation = getExifOrientation(path)
+        val rotatedBitmap = rotateBitmap(bitmap, orientation)
+        return bitmapToArray(rotatedBitmap)
     }
 
     /**
-     * @param contentResolver - content resolver
-     * @param source          - bitmap source image
-     * @param id              - path id
+     * Checks if image rotation is required based on its EXIF orientation value
+     *
+     * @param path - image file path
+     * @return true if rotation is required, false otherwise
      */
-    private fun storeThumbnail(
-        contentResolver: ContentResolver,
-        source: Bitmap,
-        id: Long
-    ) {
+    private fun isRotationRequired(path: String): Boolean {
+        val orientation = getExifOrientation(path)
+        return orientation == DEGREES_90 || orientation == DEGREES_180 || orientation == DEGREES_270
+    }
 
-        val matrix = Matrix()
+    /**
+     * Retrieves the EXIF orientation value of the image
+     *
+     * @param path - image file path
+     * @return EXIF orientation value
+     */
+    private fun getExifOrientation(path: String): Int {
+        var orientation = DEGREES_0
+        try {
+            val exif = ExifInterface(path)
+            val exifOrientation = exif.getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+            )
 
-        val scaleX = SCALE_FACTOR.toFloat() / source.width
-        val scaleY = SCALE_FACTOR.toFloat() / source.height
-
-        matrix.setScale(scaleX, scaleY)
-
-        val thumb = Bitmap.createBitmap(
-            source, 0, 0,
-            source.width,
-            source.height, matrix,
-            true
-        )
-
-        val values = ContentValues()
-        values.put(MediaStore.Images.Thumbnails.KIND, MediaStore.Images.Thumbnails.MICRO_KIND)
-        values.put(MediaStore.Images.Thumbnails.IMAGE_ID, id.toInt())
-        values.put(MediaStore.Images.Thumbnails.HEIGHT, thumb.height)
-        values.put(MediaStore.Images.Thumbnails.WIDTH, thumb.width)
-
-        val thumbUri = contentResolver.insert(
-            MediaStore.Images.Thumbnails.EXTERNAL_CONTENT_URI, values
-        )
-
-        var outputStream: OutputStream? = null
-        try{
-        outputStream.use {
-            if (thumbUri != null) {
-                outputStream = contentResolver.openOutputStream(thumbUri)
+            when (exifOrientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> orientation = DEGREES_90
+                ExifInterface.ORIENTATION_ROTATE_180 -> orientation = DEGREES_180
+                ExifInterface.ORIENTATION_ROTATE_270 -> orientation = DEGREES_270
             }
-        }}catch (e: Exception){
-        //avoid crashing on devices that do not support thumb
+        } catch (e: IOException) {
+            Log.e(TAG, "Failed to get Exif data", e)
         }
+
+        return orientation
     }
 
     /**
-     * @param orientation - exif orientation
-     * @return how many degrees is file rotated
+     * Rotates the given bitmap by the specified degrees
+     *
+     * @param bitmap     - input bitmap
+     * @param degrees    - rotation degrees
+     * @return rotated bitmap
      */
-    private fun exifToDegrees(orientation: Int): Int {
-        return when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> DEGREES_90
-            ExifInterface.ORIENTATION_ROTATE_180 -> DEGREES_180
-            ExifInterface.ORIENTATION_ROTATE_270 -> DEGREES_270
-            else -> 0
-        }
-    }
-
-    /**
-     * @param path - path to bitmap that needs to be checked for orientation
-     * @return exif orientation
-     * @throws IOException - can happen while creating [ExifInterface] object for
-     * provided path
-     */
-    @Throws(IOException::class)
-    private fun getRotation(path: String): Int {
-        val exif = ExifInterface(path)
-        return exif.getAttributeInt(
-            ExifInterface.TAG_ORIENTATION,
-            ExifInterface.ORIENTATION_NORMAL
+    private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
+        val matrix = Matrix()
+        matrix.postRotate(degrees.toFloat())
+        return Bitmap.createBitmap(
+                bitmap,
+                0,
+                0,
+                bitmap.width,
+                bitmap.height,
+                matrix,
+                true
         )
     }
 
-    private fun bitmapToArray(bmp: Bitmap): ByteArray {
+    /**
+     * Converts bitmap to byte array
+     *
+     * @param bitmap - input bitmap
+     * @return byte array
+     */
+    private fun bitmapToArray(bitmap: Bitmap): ByteArray {
         val stream = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 100, stream)
-        val byteArray = stream.toByteArray()
-        bmp.recycle()
-        return byteArray
-    }
-
-    private fun getBytesFromFile(file: File): ByteArray? {
-        val size = file.length().toInt()
-        val bytes = ByteArray(size)
-        val buf = BufferedInputStream(FileInputStream(file))
-        buf.use {
-            buf.read(bytes, 0, bytes.size)
-        }
-
-        return bytes
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, stream)
+        return stream.toByteArray()
     }
 
     /**
-     * @param contentResolver - content resolver
-     * @param path            - path to temp file that needs to be stored
-     * @param folderName      - folder name for storing video
-     * @param toDcim          - whether the file should be saved to DCIM
-     * @return true if video was saved successfully
+     * Retrieves byte array from file
+     *
+     * @param file - input file
+     * @return byte array
      */
-    fun insertVideo(
-        contentResolver: ContentResolver,
-        inputPath: String,
-        folderName: String?,
-        toDcim: Boolean,
-        bufferSize: Int = BUFFER_SIZE
-    ): Boolean {
-        val inputFile = File(inputPath)
-        val inputStream: InputStream?
-        val outputStream: OutputStream?
-
-        val extension = MimeTypeMap.getFileExtensionFromUrl(inputFile.toString())
-        val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-
-        var directory = Environment.DIRECTORY_MOVIES
-        if (toDcim) {
-            directory = Environment.DIRECTORY_DCIM
-        }
-
-        val albumDir = File(getAlbumFolderPath(folderName, MediaType.video, toDcim))
-        val videoFilePath = File(albumDir, inputFile.name).absolutePath
-
-        val values = ContentValues()
-        values.put(MediaStore.Video.Media.TITLE, inputFile.name)
-        values.put(MediaStore.Video.Media.DISPLAY_NAME, inputFile.name)
-        values.put(MediaStore.Video.Media.MIME_TYPE, mimeType)
-        values.put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis())
-        values.put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis())
-        values.put(MediaStore.Video.Media.DATE_TAKEN, System.currentTimeMillis())
-
-        if (android.os.Build.VERSION.SDK_INT < 29) {
-            try {
-                val r = MediaMetadataRetriever()
-                r.setDataSource(inputPath)
-                val durString = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                val duration = durString!!.toInt()
-                values.put(MediaStore.Video.Media.DURATION, duration)
-                values.put(MediaStore.Video.VideoColumns.DATA, videoFilePath)
-            } catch(e: Exception) {}
-        } else {
-            values.put(MediaStore.Video.Media.RELATIVE_PATH, directory + File.separator + folderName)
-        }
+    private fun getBytesFromFile(file: File): ByteArray? {
+        var source: InputStream? = null
+        var byteArray: ByteArray? = null
 
         try {
-            val url = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-            inputStream = FileInputStream(inputFile)
-            if (url != null) {
-                outputStream = contentResolver.openOutputStream(url)
-                val buffer = ByteArray(bufferSize)
-                inputStream.use {
-                    outputStream?.use {
-                        var len = inputStream.read(buffer)
-                        while (len != EOF) {
-                            outputStream.write(buffer, 0, len)
-                            len = inputStream.read(buffer)
-                        }
-                    }
-                }
-            }
-        } catch (fnfE: FileNotFoundException) {
-            Log.e("GallerySaver", fnfE.message ?: fnfE.toString())
-            return false
-        } catch (e: Exception) {
-            Log.e("GallerySaver", e.message ?: e.toString())
-            return false
-        }
-        return true
-    }
+            source = FileInputStream(file)
+            val bufferSize = Math.min(source.available(), BUFFER_SIZE)
+            byteArray = ByteArray(bufferSize)
 
-    private fun getAlbumFolderPath(
-        folderName: String?, 
-        mediaType: MediaType,
-        toDcim: Boolean
-    ): String {
-        var albumFolderPath: String = Environment.getExternalStorageDirectory().path
-        if (toDcim && android.os.Build.VERSION.SDK_INT < 29) {
-            albumFolderPath += File.separator + Environment.DIRECTORY_DCIM;
-        }
-        albumFolderPath = if (TextUtils.isEmpty(folderName)) {
-            var baseFolderName = if (mediaType == MediaType.image)
-                Environment.DIRECTORY_PICTURES else
-                Environment.DIRECTORY_MOVIES
-            if (toDcim) {
-                baseFolderName = Environment.DIRECTORY_DCIM;
+            while (source.read(byteArray, 0, bufferSize) != EOF) {
+                // Reading from source stream
             }
-            createDirIfNotExist(
-                Environment.getExternalStoragePublicDirectory(baseFolderName).path
-            ) ?: albumFolderPath
-        } else {
-            createDirIfNotExist(albumFolderPath + File.separator + folderName)
-                ?: albumFolderPath
+        } catch (e: IOException) {
+            Log.e(TAG, "Failed to read bytes from file", e)
+        } finally {
+            try {
+                source?.close()
+            } catch (e: IOException) {
+                Log.e(TAG, "Failed to close input stream", e)
+            }
         }
-        return albumFolderPath
-    }
 
-    private fun createDirIfNotExist(dirPath: String): String? {
-        val dir = File(dirPath)
-        if (!dir.exists()) {
-            if (dir.mkdirs()) {
-                return dir.path
-            } else {
-                return null
-            }
-        } else {
-            return dir.path
-        }
+        return byteArray
     }
 }

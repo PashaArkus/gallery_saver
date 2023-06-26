@@ -4,17 +4,21 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import io.flutter.plugin.common.PluginRegistry
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 enum class MediaType { image, video }
+
 /**
  * Class holding implementation of saving images and videos
  */
-class GallerySaver internal constructor(private val activity: Activity) :
-    PluginRegistry.RequestPermissionsResultListener {
+class GallerySaver internal constructor(private val activity: Activity) {
 
     private var pendingResult: MethodChannel.Result? = null
     private var mediaType: MediaType? = null
@@ -33,9 +37,9 @@ class GallerySaver internal constructor(private val activity: Activity) :
      * @param mediaType    - media type
      */
     internal fun checkPermissionAndSaveFile(
-        methodCall: MethodCall,
-        result: MethodChannel.Result,
-        mediaType: MediaType
+            methodCall: MethodCall,
+            result: MethodChannel.Result,
+            mediaType: MediaType
     ) {
         filePath = methodCall.argument<Any>(KEY_PATH)?.toString() ?: ""
         albumName = methodCall.argument<Any>(KEY_ALBUM_NAME)?.toString() ?: ""
@@ -47,64 +51,45 @@ class GallerySaver internal constructor(private val activity: Activity) :
             saveMediaFile()
         } else {
             ActivityCompat.requestPermissions(
-                activity,
-                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-                REQUEST_EXTERNAL_IMAGE_STORAGE_PERMISSION
+                    activity,
+                    arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                    REQUEST_EXTERNAL_IMAGE_STORAGE_PERMISSION
             )
         }
     }
 
     private fun isWritePermissionGranted(): Boolean {
-        return PackageManager.PERMISSION_GRANTED ==
-                ActivityCompat.checkSelfPermission(
-                    activity, Manifest.permission.WRITE_EXTERNAL_STORAGE
-                )
+        return ContextCompat.checkSelfPermission(
+                activity, Manifest.permission.WRITE_EXTERNAL_STORAGE
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun saveMediaFile() {
         uiScope.launch {
-            val success = async(Dispatchers.IO) {
+            val success = launch(Dispatchers.IO) {
                 if (mediaType == MediaType.video) {
                     FileUtils.insertVideo(activity.contentResolver, filePath, albumName, toDcim)
                 } else {
                     FileUtils.insertImage(activity.contentResolver, filePath, albumName, toDcim)
                 }
             }
-            success.await()
+            success.join()
             finishWithSuccess()
         }
     }
 
     private fun finishWithSuccess() {
-        pendingResult!!.success(true)
+        pendingResult?.success(true)
         pendingResult = null
     }
 
     private fun finishWithFailure() {
-        pendingResult!!.success(false)
+        pendingResult?.success(false)
         pendingResult = null
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int, permissions: Array<String>, grantResults: IntArray
-    ): Boolean {
-        if (requestCode == REQUEST_EXTERNAL_IMAGE_STORAGE_PERMISSION) {
-            val permissionGranted = grantResults.isNotEmpty()
-                    && grantResults[0] == PackageManager.PERMISSION_GRANTED
-            if (permissionGranted) {
-                saveMediaFile()
-            } else {
-                finishWithFailure()
-            }
-            return true
-        }
-        return false
-    }
-
     companion object {
-
         private const val REQUEST_EXTERNAL_IMAGE_STORAGE_PERMISSION = 2408
-
         private const val KEY_PATH = "path"
         private const val KEY_ALBUM_NAME = "albumName"
         private const val KEY_TO_DCIM = "toDcim"
